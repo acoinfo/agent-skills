@@ -81,6 +81,7 @@ python3 scripts/cli.py create-project --workspace-path=/ws --project-type=Applic
 ```
 
 **说明：**
+
 - **参数**：通过 `--参数名=值` 传入，下划线可替换为连字符（如 `--project-type`）
 - **返回值**：所有命令统一输出 JSON 格式到 stdout，形如 `{"status": "success"|"failed", "result": ..., "message": ...}`
 - **错误处理**：调用失败时输出 `{"status": "error", "message": "..."}` 并返回非零退出码
@@ -88,6 +89,136 @@ python3 scripts/cli.py create-project --workspace-path=/ws --project-type=Applic
 - **路径**：从工程根目录调用，或者用绝对路径指定 `scripts/cli.py`
 
 > ⚠️ 不要直接调用 `scripts/tools.py` 中的函数，统一通过 `cli.py` 包装器调用。
+
+***
+
+## 环境检测和安装
+
+### 功能概述
+
+提供 RealEvo-Stream 命令集的环境检测和自动安装功能，支持从远程服务器下载安装包并自动完成交互式安装过程。
+
+**重要前置流程**：执行任何业务操作（工作空间管理、工程管理、设备管理、构建、部署等）前，必须先检测命令集是否安装。
+
+### 工具定义
+
+| 工具名称                             | 功能描述              | 参数                      | 返回值       |
+| :------------------------------- | :---------------- | :---------------------- | :-------- |
+| `get_default_workspace_path`     | 获取当前默认工作空间路径（参考项） | 无                       | 当前工作目录路径  |
+| `check_command_set_is_installed` | 检测命令集是否已安装        | 无                       | 安装状态（布尔值） |
+| `install_command_set`            | 下载并安装命令集（自动处理交互）  | `sudopassword`: sudo 密码 | 安装结果      |
+| `install_acu_product`            | 安装 ACU Product SDK       | `sudopassword`: sudo 密码 | 安装结果      |
+| `install_precompiled_base`       | 安装预编译 Base Image      | `sudopassword`: sudo 密码 | 安装结果      |
+| `verify_permission_by_usbkey`    | 通过 USB Key 验证权限      | `sudopassword`: sudo 密码 | 验证结果      |
+| `verify_permission_by_server`   | 通过服务器验证权限         | `sudopassword`: sudo 密码, `server_ip`: 服务器 IP, `server_port`: 服务器端口 | 验证结果      |
+| `verify_permission_by_http`     | 通过 HTTP 验证权限         | `sudopassword`: sudo 密码, `http_url`: HTTP 服务器 URL | 验证结果      |
+| `show_permission_info`          | 显示权限验证信息           | 无                       | 权限信息      |
+
+### 全局前置工作流程
+
+#### 安装命令集、ACU产品、预编译 SylixOS Base
+
+所有业务流程（工作空间管理、工程管理、设备管理、构建、部署）必须先执行以下前置流程：
+
+```plaintext
+┌─────────────────────────────────────────────────────────────┐
+│  步骤1: 检测 RealEvo-Stream 命令集是否安装                    │
+│         调用 check_command_set_is_installed()               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+              ┌───────────────────────┐
+              │   命令集已安装？      │
+              └───────────────────────┘
+                    ↓是         ↓否
+        ┌───────────────┐   ┌─────────────────────────────┐
+        │  继续业务流程  │   │ 步骤2: 询问用户是否安装      │
+        └───────────────┘   │   命令集                    │
+                            └─────────────────────────────┘
+                                              ↓
+                              ┌───────────────────────┐
+                              │   用户同意安装？      │
+                              └───────────────────────┘
+                                    ↓是           ↓否
+                          ┌───────────────┐   ┌─────────────────┐
+                          │ 步骤3: 要求   │   │ 提示用户需要    │
+                          │   用户提供    │   │ 安装命令集后    │
+                          │   sudo 密码   │   │ 才能继续操作    │
+                          └───────────────┘   └─────────────────┘
+                                    ↓
+                          ┌───────────────────────┐
+                          │ 步骤4: 调用          │
+                          │   install_command_set │
+                          │   (sudopassword)     │
+                          └───────────────────────┘
+                                    ↓
+                          ┌───────────────────────┐
+                          │   安装成功？         │
+                          └───────────────────────┘
+                                    ↓是           ↓否
+                          ┌───────────────┐   ┌─────────────────┐
+                          │ 步骤5: 安装   │   │ 返回安装失败    │
+                          │   ACU SDK     │   │ 错误信息        │
+                          │   调用        │   └─────────────────┘
+                          │   install_acu │
+                          │   _product()  │
+                          └───────────────┘
+                                    ↓
+                          ┌───────────────────────┐
+                          │   安装成功？         │
+                          └───────────────────────┘
+                                    ↓是           ↓否
+                          ┌───────────────┐   ┌─────────────────┐
+                          │ 步骤6: 安装   │   │ 记录警告信息    │
+                          │   预编译      │   │ 继续执行后续    │
+                          │   Base Image  │   │ 步骤            │
+                          │   调用        │   └─────────────────┘
+                          │   install_    │
+                          │   precompiled │
+                          │   _base()     │
+                          └───────────────┘
+                                    ↓
+                          ┌───────────────────────┐
+                          │   安装成功？         │
+                          └───────────────────────┘
+                                    ↓是           ↓否
+                          ┌───────────────┐   ┌─────────────────┐
+                          │  继续业务流程  │   │ 记录警告信息    │
+                          │               │   │ 继续业务流程    │
+                          └───────────────┘   └─────────────────┘
+```
+
+#### 权限验证
+
+权限验证支持三种方式，用于验证 RealEvo-Stream 的使用权限：
+
+```plaintext
+┌─────────────────────────────────────────────────────────────┐
+│  权限验证方式选择                                             │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+        ┌───────────────────┼───────────────────┐
+        ↓                   ↓                   ↓
+┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+│ USB Key 验证  │   │ 服务器验证    │   │ HTTP 验证     │
+│ verify_       │   │ verify_       │   │ verify_       │
+│ permission_   │   │ permission_   │   │ permission_   │
+│ by_usbkey()   │   │ by_server()   │   │ by_http()     │
+└───────────────┘   └───────────────┘   └───────────────┘
+        │                   │                   │
+        ↓                   ↓                   ↓
+  需要 sudo 密码    需要 sudo 密码    需要 sudo 密码
+                      + 服务器 IP        + HTTP URL
+                      + 服务器端口
+```
+
+验证完成之后使用 show_permission_info 查看权限验证信息
+
+### 注意事项
+
+1. **网络要求**：安装过程需要访问 `armory.acoinfo.com` 下载安装包
+2. **权限要求**：需要 sudo 权限执行安装脚本
+3. **自动交互**：安装脚本会自动处理 sudo 密码输入和 proxy mode 选择
+4. **安装时间预估**：命令集安装时间预估 10 分钟、ACU 产品 SDK 安装时间预估 9 分钟、预编译 SylixOS Base 安装时间预估 6 分钟。在安装时需要提示用户。
 
 ***
 
@@ -354,7 +485,7 @@ result = init_euler_workspace(workspace_path, platform, toolchain_cmake_path, ro
 | `get_project_types`  | 获取支持创建的工程类型列表   | 无                                                                               | 工程类型列表数组 |
 | `get_project_params` | 获取指定工程类型所需的参数列表 | `project_type`: 工程类型                                                            | 参数字典     |
 | `create_project`     | 在指定工作空间下创建工程    | `workspace_path`: 工作空间目录, `project_type`: 工程类型, `create_project_params`: 工程参数对象 | 创建结果     |
-| `get_project_list`   | 获取工作空间中的项目列表    | `workspace_path`: 工作空间目录                                                      | 项目名称列表数组  |
+| `get_project_list`   | 获取工作空间中的项目列表    | `workspace_path`: 工作空间目录                                                        | 项目名称列表数组 |
 
 ### 2.3 支持的工程类型
 
@@ -612,14 +743,14 @@ result = modify_device_info("/home/test/workspace", "10.5.0.117", "Device_A", "1
 
 ### 4.2 工具定义
 
-| 工具名称         | 功能描述              | 参数                                                                                                              | 返回值    |
-| :----------- | :---------------- | :-------------------------------------------------------------------------------------------------------------- | :------ |
-| `build_clean`   | 清理工程构建产物          | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 清理结果    |
-| `build_config`  | 配置工程构建选项          | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 配置结果    |
-| `build_build`   | 构建工程              | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 构建结果    |
-| `build_install` | 安装工程到目标系统        | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 安装结果    |
-| `build_all`     | 依次执行构建步骤（clean->config->build->install） | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 构建结果    |
-| `build_uninstall` | 卸载已安装的工程         | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler）                          | 卸载结果    |
+| 工具名称              | 功能描述                                    | 参数                                                                                    | 返回值  |
+| :---------------- | :-------------------------------------- | :------------------------------------------------------------------------------------ | :--- |
+| `build_clean`     | 清理工程构建产物                                | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 清理结果 |
+| `build_config`    | 配置工程构建选项                                | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 配置结果 |
+| `build_build`     | 构建工程                                    | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 构建结果 |
+| `build_install`   | 安装工程到目标系统                               | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 安装结果 |
+| `build_all`       | 依次执行构建步骤（clean->config->build->install） | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 构建结果 |
+| `build_uninstall` | 卸载已安装的工程                                | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `os`: 操作系统（sylixos\|linux\|openeuler） | 卸载结果 |
 
 ### 4.3 工作流程
 
@@ -732,10 +863,10 @@ result = build_uninstall(workspace_path, project_name, os_name)
 
 ### 5.2 工具定义
 
-| 工具名称            | 功能描述          | 参数                                                                                | 返回值    |
-| :-------------- | :------------ | :-------------------------------------------------------------------------------- | :------ |
-| `upload_project`  | 部署工程到设备       | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `device_name`: 设备名称             | 部署结果    |
-| `upload_workspace` | 部署工作空间到设备    | `workspace_path`: 工作空间目录, `device_name`: 设备名称                                   | 部署结果    |
+| 工具名称               | 功能描述      | 参数                                                                  | 返回值  |
+| :----------------- | :-------- | :------------------------------------------------------------------ | :--- |
+| `upload_project`   | 部署工程到设备   | `workspace_path`: 工作空间目录, `project_name`: 工程名称, `device_name`: 设备名称 | 部署结果 |
+| `upload_workspace` | 部署工作空间到设备 | `workspace_path`: 工作空间目录, `device_name`: 设备名称                       | 部署结果 |
 
 ### 5.3 工作流程
 

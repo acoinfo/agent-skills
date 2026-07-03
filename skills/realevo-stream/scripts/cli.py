@@ -25,6 +25,34 @@ import tools
 # ========================================================================
 
 COMMANDS = [
+    # ---- 环境检测和安装 ----
+    ("get-default-workspace-path", tools.get_default_workspace_path, False, []),
+    ("check-command-set-is-installed", tools.check_command_set_is_installed, False, []),
+    ("install-command-set", tools.install_command_set, True, [
+        ("sudopassword", "sudo 密码（安装命令集需要管理员权限）", True),
+    ]),
+    ("install-acu-product", tools.install_acu_product, True, [
+        ("sudopassword", "sudo 密码（安装 ACU Product 需要管理员权限）", True),
+    ]),
+    ("install-precompiled-base", tools.install_precompiled_base, True, [
+        ("sudopassword", "sudo 密码（安装预编译 Base Image 需要管理员权限）", True),
+    ]),
+
+    # ---- 权限验证 ----
+    ("verify-permission-by-usbkey", tools.verify_permission_by_usbkey, True, [
+        ("sudopassword", "sudo 密码（权限验证需要管理员权限）", True),
+    ]),
+    ("verify-permission-by-server", tools.verify_permission_by_server, True, [
+        ("sudopassword", "sudo 密码（权限验证需要管理员权限）", True),
+        ("server-ip", "服务器 IP 地址", True),
+        ("server-port", "服务器端口", True),
+    ]),
+    ("verify-permission-by-http", tools.verify_permission_by_http, True, [
+        ("sudopassword", "sudo 密码（权限验证需要管理员权限）", True),
+        ("http-url", "HTTP 服务器 URL", True),
+    ]),
+    ("show-permission-info", tools.show_permission_info, True, []),
+
     # ---- 工作空间 ----
     ("get-product-series", tools.get_product_series, False, []),
     ("get-base-versions", tools.get_base_versions, False, []),

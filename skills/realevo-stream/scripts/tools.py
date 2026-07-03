@@ -4,40 +4,12 @@ import tarfile
 import os.path
 import os as os_module
 import asyncio
+import urllib.request
+import urllib.error
+import platform
+import zipfile
+import shutil
 
-# 初始化工作空间部分
-# 获取产品系列列表
-def get_product_series():
-    # 获取 /opt/acoinfo/realevo-stream/pkg/product 目录下的子文件目录
-    product_root_dir = "/opt/acoinfo/realevo-stream/pkg/product"
-    product_dir_list = []
-    for item in os.listdir(product_root_dir):
-        if os.path.isdir(os.path.join(product_root_dir, item)):
-            product_dir_list.append(item)
-    # 循环 product_dir_list
-    product_series = []
-    for product_dir in product_dir_list:
-        # 读取 product_dir 下的 stream_config.json 文件
-        stream_config_path = os.path.join(product_root_dir, product_dir, "stream_config.json")
-        with open(stream_config_path, "r") as f:
-            stream_config = json.load(f)
-            # 遍历 product_mapping 数组, 如果没有 product_mapping 数组, 则跳过
-            if "product_mapping" not in stream_config:
-                continue
-                
-            for product_mapping in stream_config["product_mapping"]:
-                # product_mapping 对象的 product_series 值为产品系列
-                product_series.append(product_mapping["product_series"])
-    # 去重
-    product_series = list(set(product_series))
-    
-    # 排序
-    product_series.sort()
-
-    return {
-        "status": "success",
-        "result": product_series
-    }
 
 # 运行命令, 逐行打印输出到控制台
 async def run_command(command, cwd=None):
@@ -73,6 +45,673 @@ async def run_command(command, cwd=None):
     print(f"\n命令执行完成，返回码: {process.returncode}")
     return process.returncode, stdout, stderr
 
+# 获取默认工作空间路径
+def get_default_workspace_path():
+    return {
+        "status": "success",
+        "message": "获取工作空间路径成功",
+        "result": os.getcwd()
+    }
+
+# realevo-stream 命令集环境检测和安装
+def check_command_set_is_installed():
+    # /opt/acoinfo/realevo-stream/bin/rl-workspace 文件是否存在
+    rl_workspace_path = "/opt/acoinfo/realevo-stream/bin/rl-workspace"
+    if not os.path.exists(rl_workspace_path):
+        return {
+            "status": "failed",
+            "message": "realevo-stream 命令集未安装",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "realevo-stream 命令集已安装",
+            "result": True
+        }
+
+
+def download_armory_package(url, download_dir, filename:str):
+    os.makedirs(download_dir, exist_ok=True)
+    filename = os.path.join(download_dir, filename)
+    try:
+        with urllib.request.urlopen(url, timeout=300) as response:
+            status_code = response.getcode()
+            if status_code != 200:
+                return {
+                    "status": "failed",
+                    "message": f"下载命令集安装包失败, 状态码: {status_code}",
+                    "result": False
+                }
+            
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                content_length = int(content_length)
+                print(f"文件大小: {content_length / 1024 / 1024:.2f} MB")
+            
+            downloaded = 0
+            
+            with open(filename, 'wb') as f:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if content_length:
+                        progress = (downloaded / content_length) * 100
+                        print(f"\r下载进度: {progress:.1f}% ({downloaded / 1024 / 1024:.2f} MB / {content_length / 1024 / 1024:.2f} MB)", end='')
+            
+            print(f"命令集 armory 包下载完成: {filename}")
+
+    except Exception as e:
+        # 抛出 e
+        raise e
+
+# 安装 realevo-stream 命令集
+async def install_command_set(sudopassword: str):
+    namespace = "realevo"
+    name = "realevo-stream"
+    target_platform = "Linux"
+    version = "latest"
+
+    # 获取当前系统架构
+    arch = platform.machine()
+    arch = arch.lower()
+
+    if arch == "aarch64":
+        arch = "arm64"
+    if arch == "x86_64":
+        arch = "x86-64"
+
+    print(f"当前系统架构: {arch}")
+
+    url = f"https://armory.acoinfo.com/v1/packages/@{namespace}/{name}/v/{version}/p/{target_platform}/a/{arch}"
+    print(f"下载命令集 armory 包 URL: {url}")
+    
+    # download_dir = "/tmp/realevo-stream"
+    download_dir = os.path.join(os.getcwd(), "temp")
+    os.makedirs(download_dir, exist_ok=True)
+
+    # 清理 download_dir 下的所有文件
+    print(f"清理下载目录: {download_dir}")
+    for f in os.listdir(download_dir):
+        file_path = os.path.join(download_dir, f)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                # shutil.rmtree(file_path)
+                pass
+        except Exception as e:
+            print(f"清理下载目录 {download_dir} 时出错: {e}")
+    print(f"下载目录清理完成: {download_dir}")
+
+    try:
+        print(f"开始下载 realevo-stream 命令集 armory 包")
+        file_name = f"{name}-{version}-{arch}.zip"
+        download_armory_package(url, download_dir, file_name)
+
+        # 解压 download_dir/file_name zip 包
+        print(f"解压命令集 armory 包: {file_name}")
+        with zipfile.ZipFile(os.path.join(download_dir, file_name), 'r') as zip_ref:
+            zip_ref.extractall(download_dir)
+        
+        # 删除 zip 文件
+        os.remove(os.path.join(download_dir, file_name))
+
+        print("搜寻 realevo-stream 命令集安装包")
+        # 在 download_dir 寻找 realevo-stream 开头的 tar.gz 文件
+        tar_gz_files = [f for f in os.listdir(download_dir) if f.startswith("realevo-stream") and f.endswith(".tar.gz")]
+            
+        # 如果 tar_gz_files 没有数据，长度为 0，则返回失败
+        if len(tar_gz_files) == 0:
+            return {
+                "status": "failed",
+                "message": f"未发现 RealEvo-Stream 命令集安装包",
+                "result": False
+            }
+            
+        realevo_stream_tar_gz = tar_gz_files[0]
+        print(f"解压命令集安装包: {realevo_stream_tar_gz}")
+        # 解压 realevo_stream_tar_gz 到 download_dir
+
+        with tarfile.open(os.path.join(download_dir, realevo_stream_tar_gz), 'r:gz') as tar:
+            tar.extractall(download_dir)
+
+        # 删除 tar 包
+        os.remove(os.path.join(download_dir, realevo_stream_tar_gz))
+
+        print("搜寻命令集安装脚本")
+        # 命令集安装脚本路径 {download_dir}/realevo-stream-package/Install.sh
+        install_script_path = os.path.join(download_dir, "realevo-stream-package", "Install.sh")
+        if not os.path.exists(install_script_path):
+            return {
+                "status": "failed",
+                "message": f"命令集安装脚本不存在: {install_script_path}",
+                "result": False
+            }
+        
+        print("执行命令集安装脚本")
+        script_dir = os.path.dirname(install_script_path)
+        
+        process = await asyncio.create_subprocess_shell(
+            f"sudo -S script -q -c 'bash Install.sh' /dev/null",
+            cwd=script_dir,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        sudo_sent = False
+        proxy_sent = False
+
+        async def read_stdout():
+            nonlocal sudo_sent, proxy_sent
+            buffer = ''
+            while True:
+                chunk = await process.stdout.read(1)
+                if not chunk:
+                    break
+                decoded = chunk.decode('utf-8', errors='replace')
+                buffer += decoded
+                
+                if '\n' in buffer:
+                    lines = buffer.split('\n')
+                    for line in lines[:-1]:
+                        if line:
+                            print(f"[STDOUT] {line}")
+                    buffer = lines[-1]
+                
+                if not sudo_sent and '[sudo]' in buffer.lower():
+                    print(f"[STDOUT] {buffer}")
+                    print("[交互] 检测到 sudo 密码提示，发送密码")
+                    await asyncio.sleep(0.5)
+                    try:
+                        process.stdin.write(f"{sudopassword}\n".encode())
+                        await process.stdin.drain()
+                    except (ConnectionResetError, BrokenPipeError) as e:
+                        print(f"[警告] 发送密码时连接断开: {e}")
+                    sudo_sent = True
+                    buffer = ''
+                
+                if not proxy_sent and 'proxy mode' in buffer.lower() and ':' in buffer:
+                    print(f"[STDOUT] {buffer}")
+                    print("[交互] 检测到代理模式选择，等待脚本准备就绪...")
+                    await asyncio.sleep(0.5)
+                    print("[交互] 发送 '1' 选择 usbkey")
+                    try:
+                        process.stdin.write(b'1\n')
+                        await process.stdin.drain()
+                    except (ConnectionResetError, BrokenPipeError) as e:
+                        print(f"[警告] 发送输入时连接断开: {e}")
+                    proxy_sent = True
+                    buffer = ''
+        
+            if buffer:
+                print(f"[STDOUT] {buffer}")
+
+        async def read_stderr():
+            nonlocal sudo_sent, proxy_sent
+            buffer = ''
+            while True:
+                chunk = await process.stderr.read(1)
+                if not chunk:
+                    break
+                decoded = chunk.decode('utf-8', errors='replace')
+                buffer += decoded
+                
+                if '\n' in buffer:
+                    lines = buffer.split('\n')
+                    for line in lines[:-1]:
+                        if line:
+                            print(f"[STDERR] {line}")
+                    buffer = lines[-1]
+                
+                if not sudo_sent and '[sudo]' in buffer.lower():
+                    print(f"[STDERR] {buffer}")
+                    print("[交互] 检测到 sudo 密码提示，发送密码")
+                    await asyncio.sleep(0.5)
+                    try:
+                        process.stdin.write(f"{sudopassword}\n".encode())
+                        await process.stdin.drain()
+                    except (ConnectionResetError, BrokenPipeError) as e:
+                        print(f"[警告] 发送密码时连接断开: {e}")
+                    sudo_sent = True
+                    buffer = ''
+                
+                if not proxy_sent and 'proxy mode' in buffer.lower() and ':' in buffer:
+                    print(f"[STDERR] {buffer}")
+                    print("[交互] 检测到代理模式选择，等待脚本准备就绪...")
+                    await asyncio.sleep(0.5)
+                    print("[交互] 发送 '1' 选择 usbkey")
+                    try:
+                        process.stdin.write(b'1\n')
+                        await process.stdin.drain()
+                    except (ConnectionResetError, BrokenPipeError) as e:
+                        print(f"[警告] 发送输入时连接断开: {e}")
+                    proxy_sent = True
+                    buffer = ''
+        
+            if buffer:
+                print(f"[STDERR] {buffer}")
+
+        await asyncio.gather(read_stdout(), read_stderr())
+
+        await process.wait()
+        return_code = process.returncode
+
+        # 移除 {download_dir}/realevo-stream-package 目录
+        shutil.rmtree(os.path.join(download_dir, "realevo-stream-package"))
+
+        if return_code != 0:
+            return {
+                "status": "failed",
+                "message": f"{filename} 命令集安装失败: {stderr.decode()}",
+                "result": False
+            }
+        else:
+            return {
+                "status": "success",
+                "message": f"RealEvo-Stream 命令集安装成功",
+                "result": True
+            }
+
+    except Exception as e:
+        # 抛出 e
+        # raise e
+        return {
+            "status": "failed",
+            "message": f"安装失败: {str(e)}",
+            "result": False
+        }
+
+# 安装 ACU Product
+async def install_acu_product(sudopassword: str):
+    namespace = "acu"
+    name = "acu-sdk"
+    target_platform = "SylixOS"
+    version = "latest"
+    arch = "noarch"
+
+    url = f"https://armory.acoinfo.com/v1/packages/@{namespace}/{name}/v/{version}/p/{target_platform}/a/{arch}"
+    print(f"下载命令集 armory 包 URL: {url}")
+    
+    # download_dir = "/tmp/realevo-stream"
+    download_dir = os.path.join(os.getcwd(), "temp")
+    os.makedirs(download_dir, exist_ok=True)
+
+    # 清理 download_dir 下的所有文件
+    print(f"清理下载目录: {download_dir}")
+    for f in os.listdir(download_dir):
+        file_path = os.path.join(download_dir, f)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                # shutil.rmtree(file_path)
+                pass
+        except Exception as e:
+            print(f"清理下载目录 {download_dir} 时出错: {e}")
+    print(f"下载目录清理完成: {download_dir}")
+
+    download_armory_package(url, download_dir,"acu-sdk.zip")
+
+    # 使用 unzip 解压 download_dir/acu-sdk.zip 到 download_dir 目录下
+    with zipfile.ZipFile(os.path.join(download_dir, "acu-sdk.zip"), 'r') as zip_ref:
+        zip_ref.extractall(download_dir)
+
+    # 删除 zip 包
+    os.remove(os.path.join(download_dir, "acu-sdk.zip"))
+    
+    # 解压 acu-sdk.tar.gz 到 download_dir 目录下
+    with tarfile.open(os.path.join(download_dir, "acu-sdk.tar.gz"), 'r:gz') as tar_ref:
+        tar_ref.extractall(download_dir)
+    
+    # 删除 tar.gz 包
+    os.remove(os.path.join(download_dir, "acu-sdk.tar.gz"))
+    
+    # 读取 download_dir/acu-sdk/stream_config.json 文件内容
+    stream_config_path = os.path.join(download_dir, "acu-sdk", "stream_config.json")
+    with open(stream_config_path, 'r') as f:
+        stream_config_json = json.load(f)
+
+    # 遍历 stream_config_json 的 base 数组
+    for base in stream_config_json.get("base", []):
+        # 获取 base 的 name、url、version
+        base_name = base.get("name")
+        base_url = base.get("url")
+        base_version = base.get("version")
+
+        # url 形如 @acu-arc/arc1000_base-devel，提取 namespace 和 name
+        if base_url.startswith("@"):
+            base_url_parts = base_url[1:].split("/")
+            base_namespace = base_url_parts[0]
+            base_name = base_url_parts[1]
+
+        down_load_url = f"https://armory.acoinfo.com/v1/packages/@{base_namespace}/{base_name}/v/{base_version}"
+        download_armory_package(down_load_url, f"{download_dir}/acu-sdk", f"{base_name}.zip")
+        # 解压 base_name.zip 到 download_dir/acu-sdk 目录下
+        with zipfile.ZipFile(os.path.join(download_dir, "acu-sdk", f"{base_name}.zip"), 'r') as zip_ref:
+            zip_ref.extractall(os.path.join(download_dir, "acu-sdk"))
+        # 删除 base_name.zip 文件
+        os.remove(os.path.join(download_dir, "acu-sdk", f"{base_name}.zip"))
+
+    # 遍历 stream_config_json 的 rootfs 数组
+    for rootfs in stream_config_json.get("rootfs", []):
+        # 获取 rootfs 的 name、url、version
+        rootfs_name = rootfs.get("name")
+        rootfs_url = rootfs.get("url")
+        rootfs_version = rootfs.get("version")
+
+        # url 形如 @acu-arc/arc1000_rootfs，提取 namespace 和 name
+        if rootfs_url.startswith("@"):
+            rootfs_url_parts = rootfs_url[1:].split("/")
+            rootfs_namespace = rootfs_url_parts[0]
+            rootfs_name = rootfs_url_parts[1]
+
+        down_load_url = f"https://armory.acoinfo.com/v1/packages/@{rootfs_namespace}/{rootfs_name}/v/{rootfs_version}"
+        download_armory_package(down_load_url, f"{download_dir}/acu-sdk", f"{rootfs_name}.zip")
+        # 解压 rootfs_name.zip 到 download_dir/acu-sdk 目录下
+        with zipfile.ZipFile(os.path.join(download_dir, "acu-sdk", f"{rootfs_name}.zip"), 'r') as zip_ref:
+            zip_ref.extractall(os.path.join(download_dir, "acu-sdk"))
+        # 删除 rootfs_name.zip 文件
+        os.remove(os.path.join(download_dir, "acu-sdk", f"{rootfs_name}.zip"))
+    
+    # 遍历 stream_config_json 的 tools 数组
+    for tool in stream_config_json.get("tools", []):
+        # 获取 tool 的 name、url、version
+        tool_name = tool.get("name")
+        tool_url = tool.get("url")
+        tool_version = tool.get("version")
+
+        # url 形如 @acu-arc/arc1000_tool，提取 namespace 和 name
+        if tool_url.startswith("@"):
+            tool_url_parts = tool_url[1:].split("/")
+            tool_namespace = tool_url_parts[0]
+            tool_name = tool_url_parts[1]
+
+        down_load_url = f"https://armory.acoinfo.com/v1/packages/@{tool_namespace}/{tool_name}/v/{tool_version}"
+        download_armory_package(down_load_url, f"{download_dir}/acu-sdk", f"{tool_name}.zip")
+        # 解压 tool_name.zip 到 download_dir/acu-sdk 目录下
+        with zipfile.ZipFile(os.path.join(download_dir, "acu-sdk", f"{tool_name}.zip"), 'r') as zip_ref:
+            zip_ref.extractall(os.path.join(download_dir, "acu-sdk"))
+        # 删除 tool_name.zip 文件
+        os.remove(os.path.join(download_dir, "acu-sdk", f"{tool_name}.zip"))
+    
+    print("SDK下载完成")
+    print("执行rl-tools update命令")
+    # 执行命令 rl-tools update --path={download_dir}/acu-sdk
+    command = f'sudo -S bash -c "PATH=/opt/acoinfo/realevo-stream/bin:$PATH rl-tools update --path={download_dir}/acu-sdk"'
+
+    process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdin_data = f"{sudopassword}\n".encode()
+    stdout, stderr = await process.communicate(input=stdin_data)
+    return_code = process.returncode
+
+    print(f"{stdout.decode()}")
+    print(f"{stderr.decode()}")
+    
+    # 移除 download_dir/acu-sdk 目录
+    shutil.rmtree(os.path.join(download_dir, "acu-sdk"))
+
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"ACU Product 安装失败: {stderr.decode()}",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "ACU Product 安装成功",
+            "result": True
+        }
+
+# 安装预编译 Base Image
+async def install_precompiled_base(sudopassword: str):
+    # 安装命令 rl-tools update --plugin=@realevo/realevo-stream-sdk
+    namespace = "realevo"
+    name = "realevo-stream-sdk"
+    target_platform = "Linux"
+    version = "latest"
+    arch = "x86-64"
+
+    url = f"https://armory.acoinfo.com/v1/packages/@{namespace}/{name}/v/{version}/p/{target_platform}/a/{arch}"
+    print(f"下载命令集 armory 包 URL: {url}")
+    
+    # download_dir = "/tmp/realevo-stream"
+    download_dir = os.path.join(os.getcwd(), "temp")
+    os.makedirs(download_dir, exist_ok=True)
+
+    download_armory_package(url, download_dir,"realevo-stream-sdk.zip")
+
+    # 使用 unzip 解压 download_dir/realevo-stream-sdk.zip 到 download_dir 目录下
+    with zipfile.ZipFile(os.path.join(download_dir, "realevo-stream-sdk.zip"), 'r') as zip_ref:
+        zip_ref.extractall(download_dir)
+    
+    # 移除 zip 包
+    os.remove(os.path.join(download_dir, "realevo-stream-sdk.zip"))
+    
+    # 解压 realevo-stream-sdk.tar.gz 到 download_dir 目录下
+    with tarfile.open(os.path.join(download_dir, "realevo-stream-sdk.tar.gz"), 'r:gz') as tar_ref:
+        tar_ref.extractall(download_dir)
+    
+    # 移除 tar.gz 包
+    os.remove(os.path.join(download_dir, "realevo-stream-sdk.tar.gz"))
+    
+    # 读取 download_dir/realevo-stream-sdk/stream_config.json 文件内容
+    stream_config_path = os.path.join(download_dir, "realevo-stream-sdk", "stream_config.json")
+    with open(stream_config_path, 'r') as f:
+        stream_config_json = json.load(f)
+
+    # 遍历 stream_config_json 的 base 数组
+    for base in stream_config_json.get("base", []):
+        # 获取 base 的 name、url、version
+        base_name = base.get("name")
+        base_url = base.get("url")
+        base_version = base.get("version")
+
+        # url 形如 @acoinfo/arc1000_base-devel，提取 namespace 和 name
+        if base_url.startswith("@"):
+            base_url_parts = base_url[1:].split("/")
+            base_namespace = base_url_parts[0]
+            base_name = base_url_parts[1]
+
+        down_load_url = f"https://armory.acoinfo.com/v1/packages/@{base_namespace}/{base_name}/v/{base_version}"
+        download_armory_package(down_load_url, f"{download_dir}/realevo-stream-sdk", f"{base_name}.zip")
+        # 解压 base_name.zip 到 download_dir/realevo-stream-sdk 目录下
+        with zipfile.ZipFile(os.path.join(download_dir, "realevo-stream-sdk", f"{base_name}.zip"), 'r') as zip_ref:
+            zip_ref.extractall(os.path.join(download_dir, "realevo-stream-sdk"))
+        # 删除 base_name.zip 文件
+        os.remove(os.path.join(download_dir, "realevo-stream-sdk", f"{base_name}.zip"))
+
+    
+    print("SDK下载完成")
+    print("执行rl-tools update命令")
+    # 执行命令 rl-tools update --path={download_dir}/realevo-stream-sdk
+    command = f'sudo -S bash -c "PATH=/opt/acoinfo/realevo-stream/bin:$PATH rl-tools update --path={download_dir}/realevo-stream-sdk"'
+
+    process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdin_data = f"{sudopassword}\n".encode()
+    stdout, stderr = await process.communicate(input=stdin_data)
+    return_code = process.returncode
+
+    print(f"{stdout.decode()}")
+    print(f"{stderr.decode()}")
+
+    # 删除 download_dir/realevo-stream-sdk 目录
+    shutil.rmtree(os.path.join(download_dir, "realevo-stream-sdk"))
+    
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"预编译 Base 安装失败: {stderr.decode()}",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "预编译 Base 安装成功",
+            "result": True
+        }
+
+
+async def verify_permission_by_usbkey(sudopassword: str):
+    # rl-tools update_lcsproxy --type=usbkey
+    command = "sudo -S bash -c 'PATH=/opt/acoinfo/realevo-stream/bin:$PATH rl-tools update_lcsproxy --type=usbkey'"
+
+    process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdin_data = f"{sudopassword}\n".encode()
+    stdout, stderr = await process.communicate(input=stdin_data)
+    return_code = process.returncode
+    
+    print(f"{stdout.decode()}")
+    print(f"{stderr.decode()}")
+    
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"权限验证失败: {stderr.decode()}",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "权限验证成功",
+            "result": True
+        }
+
+async def verify_permission_by_server(sudopassword: str, server_ip, server_port):
+    # rl-tools update_lcsproxy --type=server --server_ip= --server_port=
+    command = f"sudo -S bash -c 'PATH=/opt/acoinfo/realevo-stream/bin:$PATH rl-tools update_lcsproxy --type=server --server_ip={server_ip} --server_port={server_port}'"
+
+    process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdin_data = f"{sudopassword}\n".encode()
+    stdout, stderr = await process.communicate(input=stdin_data)
+    return_code = process.returncode
+    
+    print(f"{stdout.decode()}")
+    print(f"{stderr.decode()}")
+    
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"权限验证失败: {stderr.decode()}",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "权限验证成功",
+            "result": True
+        }
+
+async def verify_permission_by_http(sudopassword: str, http_url):
+    # rl-tools update_lcsproxy --type=http --server_ip= --server_port=
+    command = f"sudo -S bash -c 'PATH=/opt/acoinfo/realevo-stream/bin:$PATH rl-tools update_lcsproxy --type=http --server_ip={http_url}'"
+
+    process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdin_data = f"{sudopassword}\n".encode()
+    stdout, stderr = await process.communicate(input=stdin_data)
+    return_code = process.returncode
+    
+    print(f"{stdout.decode()}")
+    print(f"{stderr.decode()}")
+    
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"权限验证失败: {stderr.decode()}",
+            "result": False
+        }
+    else:
+        return {
+            "status": "success",
+            "message": "权限验证成功",
+            "result": True
+        }
+
+async def show_permission_info():
+    # rl-tools show --license
+    command = "rl-tools show --license"
+    return_code, stdout, stderr = await run_command(command)
+
+    if return_code != 0:
+        return {
+            "status": "failed",
+            "message": f"权限验证信息: {stderr.decode()}"
+        }
+    else:
+        return {
+            "status": "success",
+            "message": f"权限验证信息：{stdout.decode()}"
+        }
+
+# 初始化工作空间部分
+# 获取产品系列列表
+def get_product_series():
+    # 获取 /opt/acoinfo/realevo-stream/pkg/product 目录下的子文件目录
+    product_root_dir = "/opt/acoinfo/realevo-stream/pkg/product"
+    product_dir_list = []
+    for item in os.listdir(product_root_dir):
+        if os.path.isdir(os.path.join(product_root_dir, item)):
+            product_dir_list.append(item)
+    # 循环 product_dir_list
+    product_series = []
+    for product_dir in product_dir_list:
+        # 读取 product_dir 下的 stream_config.json 文件
+        stream_config_path = os.path.join(product_root_dir, product_dir, "stream_config.json")
+        with open(stream_config_path, "r") as f:
+            stream_config = json.load(f)
+            # 遍历 product_mapping 数组, 如果没有 product_mapping 数组, 则跳过
+            if "product_mapping" not in stream_config:
+                continue
+                
+            for product_mapping in stream_config["product_mapping"]:
+                # product_mapping 对象的 product_series 值为产品系列
+                product_series.append(product_mapping["product_series"])
+    # 去重
+    product_series = list(set(product_series))
+    
+    # 排序
+    product_series.sort()
+
+    return {
+        "status": "success",
+        "result": product_series
+    }
+
 # 通过产品系列初始化工作空间
 async def init_sylixos_workspace_by_product_series(workspace_path, product_series):
     # 在 workspace_path 目录下运行 rl-workspace init --product={product_series} 命令
@@ -87,7 +726,8 @@ async def init_sylixos_workspace_by_product_series(workspace_path, product_serie
     if return_code != 0:
         return {
             "status": "failed",
-            "message": f"工作空间初始化失败：{stderr}"
+            "message": f"工作空间初始化失败：{stderr}",
+            "result": False
         }
     else:
         return {
