@@ -1,72 +1,356 @@
 # RealEvo-Stream 原生命令参考
 
-本文说明命令路由与已确认的差异，不代替命令帮助；内容以 `/opt/acoinfo/realevo-stream` 原生命令的实际行为为准。
+命令入口：`/opt/acoinfo/realevo-stream/bin`。行为与缺陷以 [SKILL.md](../SKILL.md) 的本机 3.0.0 核验基线为准；其他版本核对帮助与源码/行为。原生帮助可能不完整，不可仅凭帮助推断非交互能力。错误信息与排错见 [constraints.md](constraints.md)。
 
-## 命令入口
+## 1. 命令总览
 
-| 命令 | 实际子命令或入口 | 用途 |
+| 命令 | 用途 |
+| --- | --- |
+| `rl-workspace` | 工作空间初始化、Base 创建、查看、清理 |
+| `rl-project` | 工程创建、配置更新、重配置、查看 |
+| `rl-build` | 构建编排：clean / config / build / install / uninstall / symbolcheck |
+| `rl-colcon` | ROS 2 工程的 colcon 构建与包列表 |
+| `rl-upload` | 工程 / 工作空间 / 目录 / 文件 / 运行时软件部署 |
+| `rl-device` | 设备增删改查、整机上传、设备端软件安装 |
+| `rl-package` | Armory 包管理：配置 / 搜索 / 安装 / 卸载 / 打包 / 发到设备 |
+| `rl-tools` | 命令集自身管理：升级、SDK、License、CMake/GCC 修补、开发工具安装 |
+| `rl-ecs` / `rl-ecsm` | ECS 容器打包与 ECSM 镜像源管理 |
+| `rl-ros` | 创建 ROS 2 包 |
+| `rl-utils` | 内部查询：平台 / 工具链 / Base 信息 |
+
+**内部辅助，通常由上层命令调用**：`sylixos-linux-tools`（仅被 `rl-build config` 调用）、`realevo-project-tools`、`realevo-symbol-tools`、`realevo-package-tools`、`realevo-complete-tools`（补全脚本，非安装器）、`armory`（二进制）。
+
+各命令通用子命令说明见下文；完整参数以 `<命令> --help` 为准。
+
+## 2. 执行顺序与依赖
+
+不可颠倒：
+
+1. 工作空间初始化 → 工程创建（工程需要工作空间的 `platforms`）。
+2. 工程创建 → 构建（`rl-build` 读 `.rlproject/.rlconfig`）。
+3. `rl-build install` → `rl-upload project`（部署读 `install-<os>/<P>`）。
+4. `rl-device add` → `rl-upload` / `rl-package install2device` / `project-run-*`（都查 `devicelist.json`）。
+5. `.realevo/arch/<P>/rootfs` 存在 → `rl-package install`（SylixOS 专用）。
+6. `rl-tools install --soft=cpython-crossenv` → 构建 cython 工程。
+7. ROS 2 三套环境装好 → `rl-project create --type=ros2` / `rl-ros create` / `rl-colcon build`。
+8. 换 Base 必须重新初始化工作空间。
+
+调用链：`rl-build` → `sylixos-linux-tools`（config 阶段唯一编译链入口）、`realevo-symbol-tools`（symbolcheck）、`rl-package install`（工程依赖）、`rl-tools install`（依赖命令）；`rl-device install` → `rl-upload soft`；`project-run-test` → `rl-upload project`；`rl-package`/`rl-tools` → `armory`。
+
+## 3. `rl-workspace`
+
+子命令 `init` `createbase` `show` `clean`。**`init` 在目标目录执行。**
+
+```
+rl-workspace init --base=<路径> --platform=<P> --createbase=<true|false> --build=<true|false>
+                  --debug_level=<debug|release> --version=<base版本> --product=<产品系列>
+                  --os=<sylixos|linux|openeuler|all>
+                  --linux_platform=<P> --linux_toolchain=<.cmake|目录> --linux_rootfs=<目录|tar.gz|/>
+                  --openeuler_platform=<P> --openeuler_toolchain=<...> --openeuler_rootfs=<...>
+                  --upload-ignore=<正则> [--quiet]
+```
+
+三条 SylixOS 路径（选一）：
+
+| 方式 | 命令 |
+| --- | --- |
+| 产品系列（平台由产品决定） | `rl-workspace init --product=<系列>` |
+| Base 版本（从 `pkg/base/` 解压，可编译） | `rl-workspace init --version=<base> --platform=<P> --createbase=true [--build=true]` |
+| 已有 Base | `rl-workspace init --base=<路径> --platform=<P>` |
+
+- SylixOS 非产品模式需要 `--platform`，多平台用 `:` 分隔；产品模式从 SDK 映射取得平台。Linux/OpenEuler 的工具链参数必填，优先传已有 `.cmake`。
+- `init` 完成参数/产品解析后、平台初始化前执行 clean，会删除 `.realevo/{arch,linux,openeuler,package_list}` 后重建。
+- `--quiet` 消除"目录型工具链多前缀"选择；不能用环境变量注入。
+- 成功产物：`.realevo/config.json`、`.realevo/devicelist.json`、`.realevo/arch/<P>/rootfs`（或 `linux`/`openeuler`）。
+
+```
+rl-workspace createbase --base=<路径> --platform=<P> [--build=<true|false>] [--debug_level=<debug|release>]
+rl-workspace show
+rl-workspace clean
+```
+
+- `createbase` 的 `--base` 省略时默认 `./.realevo/base`；目录非空报错。会改写 Base 的 `config.mk`，并写 `<base>/.rlproject/.rlconfig`。
+- `show` 打印 `.realevo/config.json`。`clean` 删除 `.realevo/{arch,linux,openeuler,package_list}`，保留 `base`、`config.json`、`devicelist.json`、`depend_armory.json`。
+- `--version=<base>` 对应 `pkg/base/<base>.tar.gz`；现有 `default`、`default_compiled`、`lts_3.6.5`、`lts_3.6.5_compiled`、`ecs_3.6.5`、`ecs_3.6.5_compiled`、`lts_com_3.9.0` 及各产品 `*_base-devel`。
+
+## 4. `rl-project`
+
+子命令 `create` `update` `reconfig` `show`。**必须在已初始化的工作空间内执行。**
+
+```
+rl-project create --name=<工程名> [--type=<类型>] [--template=<模板>|--source=<路径>]
+                  [--branch=<git分支>] [--debug-level=<debug|release>]
+                  [--make-tool=<make|ninja>] [--version=<版本>] [--upload-ignore=<正则>] [--platform=<P>] [--quiet]
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--name=` | 必填；≤60 字符；字符集 `a-zA-Z0-9_!@#$%^&~=+-` |
+| `--type=` | `cmake\|automake\|realevo\|meson\|ros2\|python\|cython\|go\|javascript\|realevo_bsp\|cmake_bsp` |
+| `--template=` | 见下表；与 `--source` 二选一 |
+| `--source=` | 本地目录、`zip/tar.gz/tgz/tar.bz2/tar.xz/tar.zst/tar`、git 仓库；**提供后被强制为 `app` 模板** |
+| `--debug-level=` | 默认 `release` |
+| `--make-tool=` | 默认 `make` |
+| `--version=` | 默认 `0.0.1` |
+| `--upload-ignore=` | 默认 `/include/:/cmake/` |
+| `--platform=` | ros2/BSP 等单平台工程显式选择，必须匹配工作空间 |
+| `--quiet` | 仅消除"多个主 CMakeLists/configure"的选择交互；**不影响平台菜单** |
+
+`--type` / `--template` 可用矩阵（以 `config/template/` 实际目录为准）：
+
+| `--type` | 可用 `--template` |
+| --- | --- |
+| `cmake` | `app` `lib` `ko` `so` `python_native_lib` `uorb_pubsub` `vsoa_pubsub` `fast_dds_pubsub`（**无 `common`**） |
+| `meson` | `app` |
+| `realevo` | `app` `ko` `shared_lib`（动态库是 `shared_lib`，不是 `lib`） |
+| `python` | `common` `native-lib` |
+| `cython` `go` `javascript` `ros2` | `common` |
+| `realevo_bsp` `cmake_bsp` | `<arch>-none`（如 `arm64-none`） |
+
+产物：`<project>/` 与 `.rlproject/{.rlconfig,params.cfg,README.md}`。Go 工程落在 `<ws>/go/src/<project>`。
+
+```
+rl-project update [--debug-level=] [--make-tool=] [--version=] [--upload-ignore=]
+                  [--cmakelists] [--configure] [--project=<工程名>] [--platform]
+rl-project reconfig
+rl-project show [--project=<工程名>]
+```
+
+- `update` 原地改写 `.rlproject/.rlconfig`，不移动源码。
+- `update`/`reconfig`/`show` **不接受 `--quiet`**。
+- `update --platform` 是无值参数，进入平台选择菜单：**仅 1 个平台时自动选中；≥2 个平台且非交互时无限自旋**。安全替代流程见 [constraints.md §2](constraints.md#2-避开不可靠的非交互接口)。
+
+## 5. `rl-build`
+
+```
+rl-build (all|clean|config|build|install|uninstall|symbolcheck|package) [options]
+  --project=<工程名>        # 工程目录内可省
+  --platforms=<P>          # 限定目标平台
+  --parallel=<N>           # 默认 1
+  --installdir=<路径>       # 默认 /
+  --strip=<true|false>     # 默认 true
+  --skiperror=<true|false> # 默认 false
+  --os=<sylixos|linux|openeuler>  # 默认 sylixos
+  --clean_config=<true|false>     # 默认 true
+  --incremental=<true|false>      # 默认 false
+```
+
+| 子命令 | 行为 / 产物 |
+| --- | --- |
+| `clean` | 删 `build-<os>`、`install-<os>`（realevo 类型额外删 `build/`）；`--incremental=true` 跳过 |
+| `config` | 逐平台调 `sylixos-linux-tools` 完成配置；python/cython/go/js **跳过** → 生成 `build-<os>/<P>/` 与 `install-<os>/<P>/` |
+| `build` | 逐平台 `make`/`ninja`；realevo 用 `make`；cython 产出 whl；go 用 `go build` |
+| `install` | 先 `make install`（cmake + strip 走 `install/strip`），再合并进 `.realevo/.../<P>/rootfs` |
+| `uninstall` | 按清单从 rootfs 删文件并删 `install-<os>/<P>` |
+| `all` | 依次 **clean → config → build → install** |
+| `symbolcheck` | 转 `realevo-symbol-tools`；**仅打印，不改变退出码** |
+| `package` | **空实现**，仅打印提示；打包用 `rl-package package` |
+
+目录命名：
+
+```
+<project>/build-<os>/<PLATFORM>/              # cmake / automake / meson
+<project>/build/<PLATFORM>/<Release|Debug>/   # realevo / realevo_bsp
+<project>/install-<os>/<PLATFORM>/{apps,lib,usr,...}
+<workspace>/.realevo/arch/<PLATFORM>/rootfs/                    # SylixOS 合并目标
+<workspace>/.realevo/{linux,openeuler}/<PLATFORM>/rootfs/       # Linux / OpenEuler
+```
+
+- `install` 只合并固定目录：`apps boot etc lib qt root sbin usr bin home tmp var`。
+- Linux/OpenEuler **native 时跳过 rootfs 合并**。
+- 工具链文件：默认 `config/cmake/sylixos.toolchain.cmake`；内核模块用 `sylixos.ko.cmake`；`cmake_bsp` 用 `sylixos.bsp.cmake`。`.rlproject/params.cfg` 每行经 `envsubst` 追加到 CMake 命令后。
+
+## 6. ROS 2：`rl-colcon` / `rl-ros`
+
+```
+rl-colcon (clean|build|list) [--merge-install] [--packages-select <P>] [--packages-skip <P>]
+          [--parallel-workers <N>] [--test-result-base <PATH>] [--event-handlers <H>]
+```
+
+- `build` 会先清理 `build-sylixos`/`install-sylixos`/`log`，产物为 `build-sylixos/<P>`、`install-sylixos/<P>`。
+- **`all` 不可用**（校验数组含它但未实现，报 `Unrecognized subcommand` 并退出 1）；`list` 可用。
+- 需在工程根目录执行；依赖 `@sylixos-middleware/ros2_jazzy-devel`（由 `rl-build` 按 `config/project_depend.json` 自动安装）。
+
+```
+rl-ros create <package_name> --build-type <cmake|ament_cmake|ament_python>
+              [--destination-directory <目录>] [--maintainer-name <名>] [--maintainer-email <邮箱>]
+              [--license <许可>] [--description <描述>] [--dependencies <依赖...>]
+              [--node-name <节点名>] [--library-name <库名>]
+```
+
+- 参数用**空格分隔**，不用 `=`；`--build-type` 必填；包名只允许小写字母/数字/下划线。
+- 必须在 ROS 2 工程的 `src/` 目录下执行；默认节点名 `test_node`。
+
+凭据接口的参数表仅用于理解原生语法，不授权把真实密码放入 argv；执行使用安全预置配置，见 [constraints.md §8](constraints.md#8-凭据权限与封装验收)。
+
+## 7. `rl-device`
+
+```
+rl-device add    --name=<名> --ip=<地址> --platform=<P> [--os=<sylixos|linux|openeuler>]
+                 [--telnet=23] [--ssh=22] [--ftp=21] [--gdb=1234]
+                 [--user=root] [--password=root] [--hostname=<宿主设备名>]
+rl-device delete --name=<名>
+rl-device update --name=<名> [--ip=] [--platform=] [--telnet=] [--ssh=] [--ftp=] [--gdb=]
+                 [--user=] [--password=] [--os=] [--hostname=]
+rl-device list
+rl-device upload --name=<名>
+rl-device install --name=<名> --soft=<python|javascript>
+```
+
+- `add` 的 `--name`、`--ip`、`--platform` 必填；设备名唯一。登记不等于验证网络或凭据。
+- 平台按 `--os` 校验：`linux`/`openeuler` 必须是 `ARM64|X86|X86_64|RISCV|LOONGARCH`；`sylixos` 必须是 63 项白名单。
+- **`rl-device upload` 用系统 `ftp mput`，有交互确认风险且无忽略规则 → 优先用 `rl-upload`**。
+- `rl-device install` 转调 `rl-upload soft`；`--soft` 仅 `python`、`javascript`。
+- 已知缺陷：`add` 写入键为 `host_name`，而 `list`/`upload` 读取 `hostName` → ECS 容器别名读不到。
+- `--hostname` 用于 ECS 容器（容器视作设备，`ip` 形如 `<宿主机IP>:<容器ID>`，凭据留空）。
+
+## 8. `rl-upload`
+
+```
+rl-upload workspace --device=<设备名> [--paths-select=] [--task-id=]
+rl-upload project   --device=<设备名> [--project=<工程名>] [--packages-select=]
+                    [--executable-file=] [--paths-select=] [--task-id=]
+rl-upload file      --device=<设备名> [--localPath=] [--remotePath=]
+rl-upload directory --device=<设备名> [--localDir=] [--remoteDir=]
+rl-upload soft      --device=<设备名> [--name=<python|javascript>] [--version=]
+```
+
+- `--device` 各子命令必填；`project` 在工程目录外需 `--project=`。
+- `project` 部署 `install-<os>/<P>`；`workspace` 部署 `.realevo/.../<P>/rootfs`；目录固定 `apps boot etc lib qt root sbin usr bin home tmp var`。
+- 路径映射：SylixOS → `/<dir>`；Linux/OpenEuler → root 用户 `/root/<dir>`，非 root `/home/<user>/<dir>`。
+- 协议：优先 FTP；设备为 linux/openeuler 或 FTP 失败时走 SFTP；建软链用 Telnet。`file`/`directory` 固定走 FTP。
+- 忽略规则：`project` 读 `.rlconfig` 的 `upload.ignore`；`workspace` 读 `.realevo/config.json` 的 `upload.ignore`。
+- `soft` 的 `--name=python|javascript` **拒绝 Linux/OpenEuler**。
+- ROS 2 工程文件部署到设备 `/apps/ros2`（特例）。
+
+## 9. 运行：`project-run-test` / `project-run-tools`
+
+命令集只提供**远程启动**语义（Telnet/SSH），不是本地调试器；本地调试由 VSCode 插件 + 设备 GDB 端口（默认 1234）完成。
+
+| 命令 | 参数 | 行为 |
 | --- | --- | --- |
-| `rl-workspace` | `init` `createbase` `show` `clean` `--version` | 初始化工作空间、准备 SylixOS Base、查看和清理平台产物 |
-| `rl-project` | `create` `update` `reconfig` `show` | 创建工程、更新配置、重配、查看配置 |
-| `rl-build` | `all` `clean` `config` `build` `install` `uninstall` `symbolcheck` `package` | 构建编排；`all` 执行 clean → config → build → install，`package` 当前为空实现 |
-| `rl-device` | `add` `delete` `update` `list` `upload` `install` | 设备清单、整机 FTP 上传、设备端软件安装 |
-| `rl-upload` | `workspace` `project` `file` `directory` `soft` | 上传工作空间或工程产物、单文件、目录、设备端软件 |
-| `rl-package` | `set` `show` `search` `install` `uninstall` `install2device` `package` | Armory 配置、检索、安装与打包 |
-| `rl-tools` | `show` `update` `update_lcsproxy` `getarmory` `install` `modifycmake` `restorecmake` `modifygcc` `restoregcc` `exportcmake` `checksymbolic` `json2struct` `--version` | 命令集、SDK、License、开发工具及系统配置辅助 |
-| `rl-colcon` | `clean` `build` `list` | ROS 2 colcon 构建与包列表 |
-| `rl-ros` | `create` | 创建 ROS 2 包 |
-| `rl-ecs` | `create` `config` `package` `upload` `load` `save` `systemcallgen` | ECS 容器包和设备操作 |
-| `rl-ecsm` | `set` `update` `list` `delete` `push` `pull` `show` | ECSM 镜像源配置与镜像传输 |
-| `project-run-tools` | 独立参数入口 | 通过 Telnet/SSH 在设备端启动程序 |
-| `project-run-test` | `--device` `--project` `--path` | 上传并运行 SylixOS 工程可执行文件 |
+| `project-run-test` | `--device= --project= --path=`（均必填） | 上传 + **前台**运行；`--path` 形如 `<...>/<project>/install-sylixos/<arch>/<remote path>`，`arch` 必须与设备 `platform` 一致；**仅 SylixOS** |
+| `project-run-tools` | `--device_name=<名>`，或位置参数 `<host> <port> <program_wd> <username> <password> <json_path> <args...>` | **后台**启动；PID 写入 `json_path` 的 `configurations[0].customConfigurationVariables.DebugPID`（**不会自动清理**） |
 
-`sylixos-linux-tools` 是 `rl-build` 调用的构建配置执行器；`realevo-project-tools`、`realevo-symbol-tools`、`realevo-package-tools`、`rl-utils` 是解析和检查辅助工具；`realevo-complete-tools` 提供 Shell 补全。`armory` 为包管理二进制，`windows_exec` 为 Windows 执行辅助脚本。常规开发先选上表中的入口。
+高风险：`project-run-tools` 的 SSH 路径发送 `"<cmd> &"` 不带 `exit`，可能不返回；Telnet 会话轮询至远程程序结束。二者都必须 `timeout` 兜底。
 
-`rl-tools update` 可升级命令集或安装 SDK：在线 SDK 使用 `--plugin=@命名空间/包名`，离线 SDK 使用 `--path=<含 stream_config.json 的目录>`。`rl-tools update_lcsproxy` 配置 `usbkey|server|http` 授权代理；环境初始化与授权优先使用本 Skill 的 CLI，以取得统一 JSON 结果及授权回读。`rl-tools install --soft=` 安装 `cpython-crossenv|go|colcon|ecsc|fastddsgen|uorb` 等开发工具，属于原生命令能力。
+`rl-project run` / `debug` 的包装在源码中被整段注释，命令集内无有效 run/debug 链路。
 
-## 目标 OS 与 Platform
+## 10. `rl-package`
 
-`--os`、`--platform`、产品系列和 ECS 架构标签是不同概念，不可混用。
+```
+rl-package set --username= --password= --repository=<url|default> --organization=
+rl-package show
+rl-package search --package=<@命名空间/包名> [--page-num=<n>]
+rl-package install --package=<spec|本地路径> [--version=] [--dependent=<yes|no>]
+rl-package uninstall --package=<spec>
+rl-package install2device --package=<spec> --device=<设备名> [--version=] [--dependent=<yes|no>]
+rl-package package --project=<工程名> [--type=<develop|source|target>] [--upload=<yes|no>]
+                   [--path=<目录>] [--access=<private|public>]
+```
 
-| 目标 OS | `rl-workspace init` 所需参数 | Platform 与构建 |
-| --- | --- | --- |
-| SylixOS | `--os=sylixos`；选择 `--product=<系列>`、`--version=<Base> --platform=<P> --createbase=true`，或已有 `--base=<路径> --platform=<P>` | `--platform` 名称须被所选 Base 的 `platforms.mk`/`config.mk` 接受；`rl-build --os=sylixos` 使用 SylixOS Base 与 `.realevo/arch/<P>/rootfs` |
-| Linux | `--os=linux --linux_platform=<P> --linux_toolchain=<.cmake 文件或工具链目录> --linux_rootfs=<目录或 tar.gz>` | `<P>` 为 `ARM64|X86|X86_64|RISCV|LOONGARCH` 中的一个；`rl-build --os=linux` 使用 `.realevo/linux/<P>/rootfs` |
-| OpenEuler | `--os=openeuler --openeuler_platform=<P> --openeuler_toolchain=<.cmake 文件或工具链目录> --openeuler_rootfs=<目录或 tar.gz>` | 同一组五个 Platform 值；`rl-build --os=openeuler` 使用 `.realevo/openeuler/<P>/rootfs` |
+- **`install` 要求 `.realevo/arch` 存在**，只适用于 SylixOS 工作空间；安装目标 `.realevo/arch/<P>/rootfs`，并记录到 `.realevo/package_list/`。
+- `install2device` 先合并到 `.realevo/package_tmp/target_merge_dir`，再调 `rl-upload directory`。
+- `package` 白名单取 `.rlconfig.package.allowlist`（默认 `/bin /lib /usr /apps`），README 取 `.rlproject/README.md`，默认输出 `rlpackage/`；`--upload=yes` 时调 `armory publish`。
+- **`uninstall` 无条件交互确认且无 `-y`**：非交互下静默取消并返回 0 → 用 `printf 'y\n' | ...` 并解析 stdout。
+- `--dependent` 默认 `yes`；不指定 `--upload=yes` 时不推送到 Armory。
 
-Linux/OpenEuler 的工具链参数始终必填。rootfs 规范化后恰好为 `/` 时为 native 构建：staging 保持空目录，构建配置不设置 `CMAKE_SYSROOT`；其他有效 rootfs 为 cross 构建。两者的初始化参数按单个平台值校验。`--os=all` 选择三个目标 OS，但仍须提供各自必要参数。`rl-workspace init` 会先清理原有 `.realevo/arch`、`linux`、`openeuler` 和 `package_list`，再次初始化前须确认这些产物可被重建。
+## 11. `rl-tools`
 
-当前全局 `config/platforms.mk` 列出以下 **63 个 SylixOS Platform 名称**；实际可用集合取决于所选 Base 和已安装工具链：
+```
+rl-tools show [--license] [--product=<名>]
+rl-tools --version
+rl-tools update [--plugin=<插件>] [--version=<版本>] [--path=<路径>] [--revert=<true|false>]
+rl-tools update_lcsproxy --type=<usbkey|server|http> [--server_ip=] [--server_port=] [--http_address=]
+rl-tools install --soft=<cpython-crossenv|go|colcon|ecsc|fastddsgen|uorb>
+rl-tools getarmory --package=<spec> [--path=<目录>] [--version=]
+rl-tools modifycmake | restorecmake | modifygcc | restoregcc
+rl-tools exportcmake --workspace=<路径> [--project=<名>]
+rl-tools checksymbolic [--path=<目录>] [--project=<名>]
+rl-tools json2struct --input=<文件> --output=<文件> [--type=] [--name=]
+```
 
-- ARM：`ARM_926H` `ARM_926S` `ARM_920T` `ARM_A5` `ARM_A5_SOFT` `ARM_A7` `ARM_A7_SOFT` `ARM_A8` `ARM_A8_SOFT` `ARM_A9` `ARM_A9_SOFT` `ARM_A15` `ARM_A15_SOFT` `ARM_V7A` `ARM_V7A_SOFT`
-- ARM64：`ARM64_A53` `ARM64_A55` `ARM64_A57` `ARM64_A72` `ARM64_GENERIC`
-- MIPS：`MIPS32` `MIPS32_SOFT` `MIPS32_R2` `MIPS32_R2_SOFT` `MIPS64_R2` `MIPS64_R2_SOFT` `MIPS64_LS3A` `MIPS64_LS3A_SOFT`
-- x86：`x86_PENTIUM` `x86_PENTIUM_SOFT` `X86_64`
-- PPC：`PPC_750` `PPC_750_SOFT` `PPC_464FP` `PPC_464FP_SOFT` `PPC_E500V1` `PPC_E500V1_SOFT` `PPC_E500V2` `PPC_E500V2_SOFT` `PPC_E500MC` `PPC_E500MC_SOFT` `PPC_E5500` `PPC_E5500_SOFT` `PPC_E6500` `PPC_E6500_SOFT`
-- SPARC：`SPARC_LEON3` `SPARC_LEON3_SOFT` `SPARC_V8` `SPARC_V8_SOFT`
-- RISCV：`RISCV_GC32` `RISCV_GC32_SOFT` `RISCV_GC64` `RISCV_GC64_SOFT`
-- LOONGARCH：`LOONGARCH64` `LOONGARCH64_SOFT`
-- CSKY：`CSKY_CK807` `CSKY_CK807_SOFT` `CSKY_CK810` `CSKY_CK810_SOFT` `CSKY_CK860` `CSKY_CK860_SOFT`
-- SW6B：`SW6B` `SW6B_SOFT`
+- `--plugin`：缺省=升级命令集、`armory`、`@acu-xxx/acu-sdk`、`@realevo/realevo-stream-sdk`（预编译 Base）。`--path` 指向本地包或**含 `stream_config.json` 的离线 SDK 目录**。
+- `show --license` 输出 `Status`（须为 `VALID`）与 `RemainingDays`。
+- **`install`/`update` 可能部分失败仍返回 0** → 解析输出的 `[ERROR]` 与 `Found N installation failures`。
+- **`update_lcsproxy` 必须显式传 `--type=`**，否则进入交互菜单。
+- **`exportcmake` 没有 `--platform` 参数，EOF 退出 select 后可能在未选平台状态继续执行，避免使用**；查询配置用工作空间配置与构建日志，修改工程平台见 [constraints.md §2](constraints.md#2-避开不可靠的非交互接口)。
+- `update` 的 `--revert` 默认 `true`，回退到不高于当前版本时会询问确认。
+- `modifycmake`/`modifygcc` **会替换系统 CMake 模块与 `gcc/g++/ld`**，用对应 `restore*` 还原。
+- 内部大量使用 `sudo`；环境准备优先用本 Skill 的 `cli.py`。
 
-`--product` 是另一种选择：当前 `acu-sdk` 的产品系列为 `ARC1000`、`AEC1000`、`ARC2000`、`AEC2000`、`AMC2000`、`ARC3000`、`AEC3000`、`AMC3000`。其 SylixOS `arch` 映射为 `ARM64_GENERIC`；其中 `AMC2000`、`AMC3000` 另有 Linux `ARM64` rootfs 和工具链配置。产品系列名不是 `--platform` 值。
+## 12. `rl-ecs` / `rl-ecsm`
 
-`rl-ecs --platform` 使用包架构标签：`arm|arm64|x86|x86-64|ppc|sparc|mips32|mips64|riscv|loongarch|csky|noarch`，与工作空间的 Platform 名称不同。
+```
+rl-ecs create --platform=<标签...> [--bundlepath=<目录>]
+rl-ecs config [--platform=] [--components=<a:b>] [--parameter=<参数>] [--bundlepath=]
+rl-ecs package --name=<名> [--tag=] [--bundlepath=] [--targetpath=] [--targetname=] [--platform=]
+rl-ecs upload --device= [--tarpath=] --targetpath=<远端目录>
+rl-ecs load --device= --tarpath= --targetpath= --containerid=
+rl-ecs save --device= --bundlepath= --tarpath= --name= --tag= [--use_scp=] [--task-id=]
+rl-ecs systemcallgen --path=<符号文件> --name=<名> [--startnumber=<起始号>]
 
-## 开发流程
+rl-ecsm set|update --id=<id> [--url=] [--username=] [--password=] [--active=<true|false>]
+rl-ecsm list | delete --id=<id> | show [--id=] [--pagenum=]
+rl-ecsm pull [--id=] --imageid=<镜像ID> --path=<本地目录> [--tarname=]
+rl-ecsm push [--id=] --path=<镜像文件>
+```
 
-1. **准备环境**：用 Skill `check` 查看 `result.installed`；必要时 `install` 和 `install-sdk`；用 `license show` 查看 `result.status`，需要时 `license set` 并确认 `VALID`。开发命令加入路径：`export PATH=/opt/acoinfo/realevo-stream/bin:$PATH`。
-2. **新目录初始化工作空间**：按目标 OS 选择上述一条 `rl-workspace init` 路径；用 `rl-workspace show` 和 `.realevo/config.json` 核对平台与工具链。SylixOS Base 可由 `createbase` 单独准备。初始化会清理旧平台产物。
-3. **创建或导入工程**：在工作空间根目录使用 `rl-project create --name=<工程名> --type=cmake --template=app` 创建常规 CMake 工程，或按实际源码类型使用 `--source=<路径>`。编辑工程源码；已有工程使用 `rl-project update|reconfig|show` 管理配置。帮助列出的工程类型不保证都存在同名模板。
-4. **构建**：`rl-build all --project=<工程名> --os=<sylixos|linux|openeuler>`，需要定位问题时分别执行 `clean`、`config`、`build`、`install`；`--platforms=<P>` 可限定目标平台。普通工程产物位于 `install-<os>/<P>/`。SylixOS ROS 2 工程使用 `rl-colcon build`，符号检查使用 `rl-build symbolcheck`。
-5. **登记设备与部署**：确认工作空间中的 `.realevo/devicelist.json`，用 `rl-device add --name=<设备名> --ip=<地址> --platform=<P> --os=<目标OS>` 登记，再用 `rl-device list` 核对。工程部署用 `rl-upload project --device=<设备名> --project=<工程名>`；工作空间 rootfs 用 `rl-upload workspace --device=<设备名>`。设备 OS、Platform 须与已构建产物一致。
-6. **运行与发布**：SylixOS 可用 `project-run-test --device=<设备名> --project=<工程名> --path=<install-sylixos 下的可执行文件>` 上传并运行，或用 `project-run-tools` 在设备端启动。需要 Armory 包时使用 `rl-package package`。ROS 2 包由 `rl-ros create` 创建；ECS 包与镜像操作分别用 `rl-ecs`、`rl-ecsm`。
+- `rl-ecs --platform` 用**包架构标签**：`arm|arm64|x86|x86-64|ppc|sparc|mips32|mips64|riscv|loongarch|csky|noarch`，与工作空间 Platform 名不同。
+- 依赖 `rl-tools install --soft=ecsc`；该工具需要 Node.js 与 npm。
+- `systemcallgen`：系统调用号不可重复，自定义**建议从 1200 开始**（内核默认约 600 个，xsiipc 占 20 个）。
+- ECSM 不指定 `--id` 时操作**活跃镜像源**；`pull` 的 `--imageid` 来自 `rl-ecsm show`。
+- 已知缺陷：`rl-ecs save` 的 FTP 通路必然失败；`rl-ecsm pull` 无总截止时间（需 `timeout`）；`rl-ecsm set/update --active` 不可用。
 
-## 实现限制与命令选择
+## 13. SylixOS Platform 白名单
 
-- `rl-build package` 当前仅输出完成提示，实际打包使用 `rl-package package`。
-- `rl-colcon all` 出现在允许命令数组中，但实际分发没有该分支；使用 `clean`、`build`、`list`。
-- `rl-package install` 要求 SylixOS `.realevo/arch`，`install2device` 也走 SylixOS 包路径；不要写成 Linux/OpenEuler 通用安装流程。
-- `rl-upload workspace/project` 探测 FTP，失败时尝试 SFTP；`file/directory` 当前固定使用 FTP。Linux/OpenEuler 工程或工作空间部署路径映射到 `/root` 或 `/home/<用户>` 下，SylixOS 映射到设备根目录。
-- `rl-upload soft` 中的 Python/JavaScript 设备运行时安装明确拒绝 Linux/OpenEuler；`project-run-test` 明确要求 SylixOS 设备及 `install-sylixos` 路径。
-- `rl-project run/debug` 无有效分发入口；`rl-project` 帮助列出的 CMake `common` 模板在当前模板目录中不存在。构建命令成功与否应结合退出码、错误输出和产物核验。
+共 **63 项**（`createbase` 报错时打印的完整清单）。实际可用集合取决于所选 Base 与已安装工具链。
+
+- **ARM**：`ARM_926H` `ARM_926S` `ARM_920T` `ARM_A5` `ARM_A5_SOFT` `ARM_A7` `ARM_A7_SOFT` `ARM_A8` `ARM_A8_SOFT` `ARM_A9` `ARM_A9_SOFT` `ARM_A15` `ARM_A15_SOFT` `ARM_V7A` `ARM_V7A_SOFT`
+- **ARM64**：`ARM64_A53` `ARM64_A55` `ARM64_A57` `ARM64_A72` `ARM64_GENERIC`
+- **MIPS**：`MIPS32` `MIPS32_SOFT` `MIPS32_R2` `MIPS32_R2_SOFT` `MIPS64_R2` `MIPS64_R2_SOFT` `MIPS64_LS3A` `MIPS64_LS3A_SOFT`
+- **x86**：`x86_PENTIUM` `x86_PENTIUM_SOFT` `X86_64`
+- **PPC**：`PPC_750` `PPC_750_SOFT` `PPC_464FP` `PPC_464FP_SOFT` `PPC_E500V1` `PPC_E500V1_SOFT` `PPC_E500V2` `PPC_E500V2_SOFT` `PPC_E500MC` `PPC_E500MC_SOFT` `PPC_E5500` `PPC_E5500_SOFT` `PPC_E6500` `PPC_E6500_SOFT`
+- **SPARC**：`SPARC_LEON3` `SPARC_LEON3_SOFT` `SPARC_V8` `SPARC_V8_SOFT`
+- **RISCV**：`RISCV_GC32` `RISCV_GC32_SOFT` `RISCV_GC64` `RISCV_GC64_SOFT`
+- **LOONGARCH**：`LOONGARCH64` `LOONGARCH64_SOFT`
+- **CSKY**：`CSKY_CK807` `CSKY_CK807_SOFT` `CSKY_CK810` `CSKY_CK810_SOFT` `CSKY_CK860` `CSKY_CK860_SOFT`
+- **SW6B**：`SW6B` `SW6B_SOFT`
+
+平台 → 工具链前缀/CPU/FPU 的权威映射在 `config/platforms.mk` 与所选 Base 的 `platforms.mk`；可用 `rl-utils get-toolchain <P> <n>` 查询。产品系列（`ARC1000` `AEC1000` `ARC2000` `AEC2000` `AMC2000` `ARC3000` `AEC3000` `AMC3000`）只能用于 `--product=`。
+
+## 14. 配置文件与目录
+
+```
+<workspace>/
+├── .realevo/
+│   ├── config.json            # 工作空间主配置
+│   ├── devicelist.json        # 设备清单
+│   ├── depend_armory.json     # 工作空间依赖包
+│   ├── base/                  # SylixOS Base 工程（clean 保留）
+│   ├── arch/<PLATFORM>/rootfs/          # SylixOS sysroot / 部署源
+│   ├── linux|openeuler/<PLATFORM>/rootfs/
+│   └── package_list/          # rl-package 安装记录
+├── <project>/.rlproject/{.rlconfig, params.cfg, README.md}
+├── go/src/<project>/          # Go 工程特殊位置
+└── rlpackage/<project>/       # rl-package package 默认输出
+```
+
+`.realevo/config.json` 关键字段：`base`、`base_type`、`mularch`（`yes`/`no`）、`debug_level`、`platforms`、`linux_toolchain`、`linux_rootfs`、`linux_native`、`linux_platforms`、`openeuler_*`、`upload.ignore`、`sylixos_min_kernel_version`、`RealEvo_Version`。
+
+`.rlproject/.rlconfig` 关键字段：`debug_level`、`build_type`、`template`、`make_tool`、`version`、`cmakelists_dir`、`configure_dir`、`platform`、`upload.ignore`（部署黑名单）、`package.allowlist`（打包白名单）、`dependencies`、`devel_dependencies`。
+
+用户级：`~/.realevo-stream/settings.json`（ECSM 等）、`~/.realevo-stream/*.db`（任务/上传记录）、`~/.armory/*.json`（Armory 账号，**密码明文**）、`/etc/lcsproxy/lcsproxy.conf`（License）。
+
+已知缺陷：`rl-workspace show` 与 `rl-package` 读 `mini_kernel_version`，而写入键是 `sylixos_min_kernel_version` → 该字段读不到。
+
+## 15. 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `REALEVO_COMPILER_PATH` | 由 `Install.sh` 写入 `/etc/profile`：`bin` + 全部 `compiler/*-sylixos-toolchain/bin` |
+| `REALEVO_HOME` | 本 Skill `cli.py` 读取的命令集根目录（默认 `/opt/acoinfo/realevo-stream`） |
+| `REALEVO_SUDO_PASSWORD` | 本 Skill `cli.py` 用于 sudo 免交互预认证 |
+| `REALEVO_NATIVE` | `rl-build` 传给 `sylixos-linux-tools` 的 native 布尔 |
+
+`--quiet` 分工：`rl-workspace --quiet` 消除工具链多前缀选择；`rl-project create --quiet` 只消除多主配置文件选择（不影响平台菜单）。**不存在**通用的 `CI` / `NONINTERACTIVE` 非交互开关。
